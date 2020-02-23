@@ -1,0 +1,228 @@
+-- adding necessary commands
+ADD JAR /opt/cloudera/parcels/CDH/lib/hive/lib/hive-hcatalog-core-1.1.0-cdh5.11.2.jar;
+
+SET hive.exec.max.dynamic.partitions=100000;
+SET hive.exec.max.dynamic.partitions.pernode=100000;
+
+--drop table anu.yellow_trip;
+
+-- create an external table  with the data in the common folder
+CREATE EXTERNAL TABLE IF NOT EXISTS anu.yellow_trip(VendorID int,tpep_pickup_datetime timestamp,
+tpep_dropoff_datetime timestamp, passenger_count int, trip_distance double, RateCodeID int,store_and_fwd_flag string,
+PULocationID int,DOLocationID int, payment_type int,fare_amount double, extra double,mta_tax double,tip_amount double,
+tolls_amount double,improvement_surcharge double,Total_amount double) ROW FORMAT DELIMITED FIELDS TERMINATED BY ','
+LOCATION '/common_folder/nyc_taxi_data/'
+tblproperties ("skip.header.line.count"="1");
+
+--select * from anu.yellow_trip;
+
+select count(*) from anu.yellow_trip;
+-- there are total 1174569 rows
+
+-- Basic Data Quality Checks
+
+-- How many records has each TPEP provider provided? Write a query that summarises the number of records of each provider.
+select VendorID, count(*) from anu.yellow_trip
+group by VendorID
+order by VendorID;
+-- There are 44.9%(527386/1174569) data belonging to vendor 1 i.e. Creative Mobile Technologies, LLC
+-- and 55.09%(647183/1174569) data belonging to vendor 2 i.e. VeriFone Inc
+
+-- Data Quality Issues
+
+select * from anu.yellow_trip where tpep_pickup_datetime < '2017-11-01 00:00:00' or tpep_pickup_datetime > '2017-12-31 23:59:59';
+-- There are 10 trips which were started before 1st november 2017 and 4 trips which were started after 31 dec 2017
+
+----------------------------------------------------
+select * from anu.yellow_trip where tpep_dropoff_datetime < '2017-11-01 00:00:00' or
+(tpep_pickup_datetime > '2017-12-31 23:59:59' and tpep_dropoff_datetime > '2017-12-31 23:59:59');
+-- There are 10 invalid trips
+-------------------------------------------------------
+select * from anu.yellow_trip where tpep_pickup_datetime < '2017-11-01 00:00:00' or tpep_pickup_datetime > '2017-12-31 23:59:59' or
+tpep_dropoff_datetime < '2017-11-01 00:00:00' or
+(tpep_pickup_datetime > '2017-12-31 23:59:59' and tpep_dropoff_datetime > '2017-12-31 23:59:59');
+-------------------------------------------------
+
+SELECT count(*)
+FROM anu.yellow_trip
+where unix_timestamp(tpep_pickup_datetime) > unix_timestamp(tpep_dropoff_datetime);
+-- There are 73 rows where pickup timestamp is greater than dropoff timestamp
+
+select * from anu.yellow_trip where month(tpep_pickup_datetime) = 10;
+
+select distinct(passenger_count) from anu.yellow_trip order by passenger_count;
+-- so passenger count ranges from 0 to 9
+
+select count(*) from anu.yellow_trip where passenger_count = 0;
+-- There are 6824 rows for which passenger count is 0. 
+--These can be considered as invalid trips as there were no passengers for the same
+
+select * from anu.yellow_trip where RatecodeID not in (1,2,3,4,5,6);
+-- For 9 rows ratecodeId is 99 whhich is not mentioned in the allowed rate code ids. So can be removed
+
+select * from anu.yellow_trip where Store_and_fwd_flag not in ('Y', 'N');
+-- for all the rows Store_and_fwd_flag has correct value
+
+select * from anu.yellow_trip where Payment_type not in (1,2,3,4,5,6);
+-- There are 0 rows having invalid payment type
+
+select min(Fare_amount) as MinFareAmt, max(Fare_amount) as MaxFareAmt from anu.yellow_trip;
+-- Here min Fare amount is -200. Fare amount cannot be negative.
+
+select count(*) from anu.yellow_trip where Fare_amount <= 0;
+-- there are 870 rows for which fare amount is 0 or negative
+
+select extra, count(*) from anu.yellow_trip group by extra order by extra;
+
+select * from anu.yellow_trip where trip_distance <= 0;
+-- here amount is present even when the trip distance is 0 for 7402 rows
+
+--select count(*) from anu.yellow_trip where trip_distance <= 0;
+
+select count(*) from anu.yellow_trip where tpep_pickup_datetime = tpep_dropoff_datetime and Total_amount > 0;
+-- There are 6287 rows having pickup and dropoff timestamp as same but amount > 0 so we can drop these rows
+
+select count(*) from anu.yellow_trip where tpep_pickup_datetime != tpep_dropoff_datetime and Total_amount >0;
+-- 1167061 rows have valid entry
+
+-- -------------------------------------------------------------------------------------------------------------------------------
+-- drop table anu.yellow_trip_year_month_partition_orc;  
+
+-- creating ORC partition table based on year 2017, months 11 and 12 and also partitioning on dates for the further analysis
+create external table if not exists anu.yellow_trip_year_month_partition_orc
+(VendorID int,
+tpep_pickup_datetime timestamp,
+tpep_dropoff_datetime timestamp,
+passenger_count int,
+trip_distance double,
+RateCodeID int,
+store_and_fwd_flag string,
+PULocationID int,
+DOLocationID int,
+payment_type int,
+fare_amount double,
+extra double,
+mta_tax double,
+tip_amount double,
+tolls_amount double,
+improvement_surcharge double,
+Total_amount double)
+partitioned by (yr int, mnth int, dte int)
+stored as orc location '/user/hive/warehouse/anu_mon.db'
+tblproperties ("orc.compress"="SNAPPY");
+
+
+-- inserting data into the partiotion table
+insert overwrite table anu.yellow_trip_year_month_partition_orc
+partition(yr , mnth, dte)
+select * , year(tpep_pickup_datetime) as yr,month(tpep_pickup_datetime) as mnth, day(tpep_pickup_datetime) as dte
+from anu.yellow_trip
+where month(tpep_pickup_datetime) in (11,12)
+and year(tpep_pickup_datetime) = 2017
+and passenger_count > 0
+and RateCodeID in (1,2,3,4,5,6)
+and store_and_fwd_flag in ('Y','N')
+and payment_type in (1,2,3,4,5,6)
+-- and fare_amount > 0
+-- and Tip_amount > 0
+-- and Tolls_amount > 0
+and Total_amount > 0
+and tpep_pickup_datetime < tpep_dropoff_datetime
+and improvement_surcharge in (0, 0.3)
+and mta_tax in (0, 0.5)
+and extra in (0, 0.5, 1)
+and trip_distance > 0;
+
+
+select count(*) from anu.yellow_trip_year_month_partition_orc;
+-- There are 1153737 rows after data cleaning
+
+-- Analysis-I
+
+-- 1. Compare the overall average fare per trip for November and December.
+
+select mnth, avg(fare_amount) from anu.yellow_trip_year_month_partition_orc group by mnth order by mnth;
+-- november avg fare amount is 12.90 and for december is 12.69
+
+
+select mnth, avg(Total_amount) from anu.yellow_trip_year_month_partition_orc group by mnth order by mnth;
+-- -- avg total fare for nov month is 16.19 and for dec month is 15.89
+
+-- So november has higher avg fare amount and total amount than december
+
+-- 2. Explore the ‘number of passengers per trip’ - how many trips are made by each level of ‘Passenger_count’? Do most people travel solo or with other people?
+
+select passenger_count, count(*) from anu.yellow_trip_year_month_partition_orc group by passenger_count order by passenger_count;
+-- from the result we can say that most of the people prefer to travel solo and the count is 817130 which is around 70.82%(817130/1153737).
+
+-- 3. Which is the most preferred mode of payment?
+select payment_type, count(*) from anu.yellow_trip_year_month_partition_orc group by payment_type order by payment_type;
+-- from the results we understand that most of the people prefer Credit card for the mode of payment count being the highest which is 779165
+-- which is 67.53%(779165/1153737);
+
+-- 4. What is the average tip paid per trip? Compare the average tip with the 25th, 50th and 75th percentiles and comment whether the
+-- ‘average tip’ is a representative statistic (of the central tendency) of ‘tip amount paid’. Hint: You may use percentile_approx(DOUBLE col, p)
+-- : Returns an approximate pth percentile of a numeric column (including floating point types) in the group.
+
+
+select percentile_approx(tip_amount,0.25) as 25_percentile,percentile_approx(tip_amount,0.50) as 50_percentile,
+percentile_approx(tip_amount,0.75) as 75_percentile,avg(tip_amount) overall_average
+from anu.yellow_trip_year_month_partition_orc;
+
+-- so the overall avergae is to the right side of the median that is the 50 percentile.
+-- We see that the median and mean do have a large gap between them and hence it can be said that it is not a representative of central tendency.
+--Infact the data is positively skewed as mean is greater than median.
+
+
+--5. Explore the ‘Extra’ (charge) variable - what fraction of total trips have an extra charge is levied?
+
+select sum(case when extra>0 then 1 else 0 end)/count(*) from anu.yellow_trip_year_month_partition_orc;
+-- The fraction of about  0.46 or about 46.14% trips had an extra charge 
+
+
+-- Analysis-II
+
+-- 1. What is the correlation between the number of passengers on any given trip, and the tip paid per trip?
+-- Do multiple travellers tip more compared to solo travellers? Hint: Use CORR(Col_1, Col_2)
+
+select corr(passenger_count, tip_amount) from anu.yellow_trip_year_month_partition_orc;
+
+-- The correlation between these 2 columns is -0.00529684045944858
+-- Thus although not a strong correlation, it is sligtl negatively correlated.
+-- That means, the solo travellers tend to pay slightly higher tip than multi travellers
+
+-- 2. Segregate the data into five segments of ‘tip paid’: [0-5), [5-10), [10-15) , [15-20) and >=20. 
+-- Calculate the percentage share of each bucket (i.e. the fraction of trips falling in each bucket).
+
+select Tip_Bucket_Range,
+round(count(*)/max(records_count),5)as Fraction
+from (select s.*, count(*) over () records_count,
+	CASE when tip_amount >= 0 and tip_amount <5 then '[0,5)' 
+	when tip_amount >=5 and tip_amount < 10 then '[5,10)'
+	when tip_amount >=10 and tip_amount < 15 then '[10,15)'
+	when tip_amount >=15 and tip_amount < 20 then '[15,20)'
+	else '>20 ' 
+	end as Tip_Bucket_Range
+    from anu.yellow_trip_year_month_partition_orc s )as bucket_total
+group by Tip_Bucket_Range;
+
+--highest percent of share is the 0-4 bucket which is the tip paid for max number of times.
+
+-- 3. Which month has a greater average ‘speed’ - November or December? Note that the variable ‘speed’ will have to be derived from other metrics. Hint: You have columns for distance and time.
+
+select mnth, avg(Trip_distance *3600 / (unix_timestamp(tpep_dropoff_datetime) - unix_timestamp(tpep_pickup_datetime))) as speed
+from anu.yellow_trip_year_month_partition_orc group by mnth;
+-- december has the higher speed 11.07 miles per hr
+
+-- 4. Analyse the average speed of the most happening days of the year, i.e. 31st December (New year’s eve) and 25th December (Christmas)
+-- and compare it with the overall average.
+Select round(avg(case when mnth=12 and dte=25
+then (trip_distance*3600/(unix_timestamp(tpep_dropoff_datetime)-unix_timestamp(tpep_pickup_datetime))) else null end),2) as christmas,
+round(avg(case when mnth=12 and dte=31
+then( trip_distance*3600/(unix_timestamp(tpep_dropoff_datetime)-unix_timestamp(tpep_pickup_datetime))) else null end ),2) as new_yr,
+round(avg(trip_distance*3600/(unix_timestamp(tpep_dropoff_datetime)-unix_timestamp(tpep_pickup_datetime))),2) as overall_avg
+from anu.yellow_trip_year_month_partition_orc;
+
+-- so the happening days seems to have higher speed because there would be scope for more number of trips for those days which the driver do not want to miss and hence they would be completing their trips as fast as possible.
+-- highest is for christmas with 15.27 miles per hr followed by new year with 13.25 miles per hour.
+-- overall is 11.02
